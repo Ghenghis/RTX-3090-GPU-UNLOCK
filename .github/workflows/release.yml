@@ -1,0 +1,114 @@
+# Signed, provenance-backed SOURCE releases.
+#
+# Scope note: this publishes a verifiable SOURCE archive only. It does NOT build,
+# bundle, or publish the unlock EFI payload, NVIDIA firmware, or any binary that
+# modifies hardware. Its entire purpose is trust: so anyone can prove the source
+# they downloaded is exactly what this repository tagged, unmodified.
+#
+# What a consumer gets per release:
+#   - <name>-<tag>.tar.gz        the source archive (git-tracked files only)
+#   - SHA256SUMS                 checksums for the archive
+#   - sbom.spdx.json             software bill of materials (syft)
+#   - cosign signature bundle    Sigstore keyless signature over the archive
+#   - build provenance           SLSA attestation (gh attestation verify ...)
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build artifacts for"
+        required: true
+
+permissions:
+  contents: write      # create the release / upload assets
+  id-token: write      # cosign keyless signing + provenance (OIDC)
+  attestations: write  # build provenance attestation
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Build reproducible source archive
+        id: archive
+        run: |
+          set -euo pipefail
+          name="$(basename "${GITHUB_REPOSITORY}")"
+          out="${name}-${TAG}.tar.gz"
+          # git archive includes only tracked files; deterministic given the tag.
+          git archive --format=tar --prefix="${name}-${TAG}/" "${TAG}" \
+            | gzip -n > "${out}"
+          echo "artifact=${out}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate checksums
+        run: sha256sum "${{ steps.archive.outputs.artifact }}" > SHA256SUMS
+
+      - name: Verify source manifest (advisory)
+        continue-on-error: true
+        run: python3 -I scripts/verify_manifest.py --strict
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign the archive (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob --yes \
+            --bundle "${{ steps.archive.outputs.artifact }}.sigstore.json" \
+            "${{ steps.archive.outputs.artifact }}"
+
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ${{ steps.archive.outputs.artifact }}
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          generate_release_notes: true
+          files: |
+            ${{ steps.archive.outputs.artifact }}
+            ${{ steps.archive.outputs.artifact }}.sigstore.json
+            SHA256SUMS
+            sbom.spdx.json
+          body: |
+            ## Verification
+
+            This is a **source-only** release. Verify before trusting it:
+
+            ```bash
+            # 1. Checksums
+            sha256sum -c SHA256SUMS
+
+            # 2. Sigstore signature (keyless)
+            cosign verify-blob \
+              --bundle <archive>.sigstore.json \
+              --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.github/workflows/release.yml@.*' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              <archive>
+
+            # 3. Build provenance (SLSA)
+            gh attestation verify <archive> --owner ${{ github.repository_owner }}
+            ```
+
+            No firmware, driver, or EFI binary is included. Build from this source
+            on your own machine; see SECURITY.md and docs/RECOVERY.md first.

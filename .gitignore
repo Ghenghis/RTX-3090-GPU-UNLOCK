@@ -1,0 +1,24 @@
+# Local only: these carry GPU UUIDs, host names and per-machine measurements.
+# verify_unlock.py --calibrate writes to the per-user config dir by default; these
+# patterns also catch a calibration file pointed into the repo with --calibration.
+calibration*.json
+*.calibration.json
+*.json.tmp
+.rtx-unlock/
+# Verifier/monitor logs (verify_unlock.py --log) and any other run logs.
+*.log
+logs/
+# gemm_bench.py run records (device_uuid, pci_bus_id, host).
+locked*.json
+unlocked*.json
+runs/
+results/
+
+# Python and tool caches.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
